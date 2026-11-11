@@ -4,3 +4,11 @@ __pycache__/
 *.pyc
 .venv/
 node_modules/
+
+# Generated/local files
+data/prepared_transcripts.json
+workflows/current-export.json
+workflows/n8n-workflows.json
+workflows/n8n-workflows-patched.json
+workflows/verified-workflows.json
+workflows/workflow-b-fixed.json

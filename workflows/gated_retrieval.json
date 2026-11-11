@@ -1,0 +1,394 @@
+{
+  "updatedAt": "2026-11-11T13:51:36.962Z",
+  "createdAt": "2026-11-11T13:40:36.579Z",
+  "id": "gG2Z6IQZmiWmBRO8",
+  "name": "Workflow B - Gated Retrieval",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "rag/query",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "151f1195-f7a4-4463-8407-b1d1642493e3",
+      "name": "Webhook - Receive Query",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -528,
+        -32
+      ],
+      "webhookId": "4bc4b684-cac5-49ac-ae64-546fdff4e4d0"
+    },
+    {
+      "parameters": {
+        "jsCode": "const query = String($json.body?.query ?? $json.query ?? '').trim();\nif (!query) throw new Error('Missing query');\nreturn [{json:{query}}];"
+      },
+      "id": "25ec6a1a-7b0f-46ac-bfa6-4af2a7ab3862",
+      "name": "Validate Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -304,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "greeting-condition",
+              "leftValue": "={{ $json.query }}",
+              "rightValue": "^(hi|hello|hey|good morning|good afternoon|good evening)[!. ]*$",
+              "operator": {
+                "type": "string",
+                "operation": "regex"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3e763253-d9c1-4397-bc98-435ef7410a7d",
+      "name": "Is Greeting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -80,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"answer\":\"Hello! How can I help you with your coaching challenge today?\"}",
+        "options": {}
+      },
+      "id": "a9c5ff4d-e2b0-40ea-910f-ee29517dc89a",
+      "name": "Return Greeting",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        160,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/embed",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({model:'bge-m3',input:$json.query}) }}",
+        "options": {}
+      },
+      "id": "9130312f-1058-4f72-9088-e7c0071b5164",
+      "name": "Generate Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        160,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $('Validate Query').first().json;\nconst embedding = $json.embeddings?.[0];\nif (!Array.isArray(embedding) || embedding.length !== 1024) throw new Error('Invalid BGE-M3 embedding');\nreturn [{json:{query:original.query,embedding}}];"
+      },
+      "id": "adc4e842-2610-4168-b5ce-0e555af35e21",
+      "name": "Merge Query and Embedding",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH q AS (\n    SELECT $1::vector AS embedding\n),\nranked AS (\n    SELECT\n        k.id,\n        k.session_id,\n        k.stream_type,\n        k.content,\n        k.metadata,\n        1 - (k.embedding <=> q.embedding) AS similarity,\n        ROW_NUMBER() OVER (\n            PARTITION BY k.stream_type\n            ORDER BY k.embedding <=> q.embedding\n        ) AS rank\n    FROM knowledge_vault k\n    CROSS JOIN q\n    WHERE\n        (k.stream_type = 'framework'\n         AND 1 - (k.embedding <=> q.embedding) >= 0.50)\n        OR\n        (k.stream_type = 'voice_sample'\n         AND 1 - (k.embedding <=> q.embedding) >= 0.60)\n)\nSELECT *\nFROM ranked\nWHERE rank <= 2\nORDER BY similarity DESC;",
+        "options": {
+          "queryReplacement": "=={{ [  '[' + $('Merge Query and Embedding').first().json.embedding.join(',') + ']'] }}"
+        }
+      },
+      "id": "badfb0cb-f444-49d7-a4e5-3a7669815d9b",
+      "name": "Retrieve Matching Documents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        592,
+        80
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "5gnpXBnMHYkvHLKk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "match-condition",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "159e205a-4b04-42a6-9c20-878054c8f117",
+      "name": "Any Matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        816,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"answer\":\"No documented coaching frameworks match this topic.\"}",
+        "options": {}
+      },
+      "id": "08eb6999-7aef-4243-89f9-afee10e6adf8",
+      "name": "Return No-Match Fallback",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1040,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(item=>item.json);\nif (!rows.length) throw new Error('No retrieved documents');\nconst frameworks = rows.filter(r=>r.stream_type==='framework');\nconst voices = rows.filter(r=>r.stream_type==='voice_sample');\nconst query = $('Validate Query').first().json.query;\nreturn [{json:{query,frameworks,voices,context:rows.map(r=>`[${r.stream_type} | similarity ${Number(r.similarity).toFixed(3)}]\\n${r.content}`).join('\\n\\n')}}];"
+      },
+      "id": "1de5baf4-b4d5-4d54-aff8-85e7dbb3e818",
+      "name": "Prepare Retrieved Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({model:'llama3',stream:false,messages:[{role:'system',content:'You are a coaching knowledge assistant. Answer only from the retrieved coaching context. Do not invent frameworks or advice. Use the coach voice samples to guide tone, not as factual evidence. If the context does not support an answer, say so clearly.'},{role:'user',content:'Question: '+$json.query+'\\n\\nRetrieved context:\\n'+$json.context}]}) }}",
+        "options": {}
+      },
+      "id": "66ba7d7d-f422-4d6b-84a6-2c0f442a8944",
+      "name": "Generate Coaching Answer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1264,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {answer:$json.message?.content ?? 'Unable to generate an answer.'} }}",
+        "options": {}
+      },
+      "id": "09975edd-4c4b-4222-adc6-41bc7abfaec9",
+      "name": "Return Answer",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1472,
+        -32
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Query": {
+      "main": [
+        [
+          {
+            "node": "Validate Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Query": {
+      "main": [
+        [
+          {
+            "node": "Is Greeting?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Greeting?": {
+      "main": [
+        [
+          {
+            "node": "Return Greeting",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Query Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "Merge Query and Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Query and Embedding": {
+      "main": [
+        [
+          {
+            "node": "Retrieve Matching Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieve Matching Documents": {
+      "main": [
+        [
+          {
+            "node": "Any Matches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Matches?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retrieved Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Return No-Match Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Retrieved Context": {
+      "main": [
+        [
+          {
+            "node": "Generate Coaching Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Coaching Answer": {
+      "main": [
+        [
+          {
+            "node": "Return Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "staticData": null,
+  "meta": null,
+  "nodeGroups": [],
+  "pinData": {},
+  "versionId": "cf0988ef-0c36-48a1-89e5-e0769d16cf18",
+  "activeVersionId": null,
+  "versionCounter": 12,
+  "triggerCount": 0,
+  "sourceWorkflowId": null,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-11-11T13:40:36.579Z",
+      "createdAt": "2026-11-11T13:40:36.579Z",
+      "role": "workflow:owner",
+      "workflowId": "gG2Z6IQZmiWmBRO8",
+      "projectId": "qfbktj65qptIpCoE",
+      "project": {
+        "updatedAt": "2026-11-11T11:54:28.694Z",
+        "createdAt": "2026-11-11T11:34:17.772Z",
+        "id": "qfbktj65qptIpCoE",
+        "name": "Mohammed aintomar.mohamed19@gmail.com <aintomar.mohammed200@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "customTelemetryTags": [],
+        "creatorId": "2963e29d-e52e-4e26-9693-f41c4351787e"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
+  }
+}

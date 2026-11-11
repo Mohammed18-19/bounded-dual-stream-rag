@@ -1,0 +1,485 @@
+{
+  "updatedAt": "2026-11-11T13:38:30.423Z",
+  "createdAt": "2026-11-11T11:56:59.282Z",
+  "id": "060wxFMDltBrRet5",
+  "name": "Workflow A - Ingestion Firewall",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "1822f2de-d434-4012-b129-d5bb1c8e5b3a",
+      "name": "Start Ingestion",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -528,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/data/mock_transcripts.json",
+        "options": {}
+      },
+      "id": "9ef6ec6c-5ce9-4cd2-835f-b3aee119ac1e",
+      "name": "Read Mock Transcripts",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -304,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "fromJson",
+        "options": {}
+      },
+      "id": "2a3f906e-36e5-42f2-8972-78c03593805d",
+      "name": "Parse JSON Dataset",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -80,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst inputItems = $input.all();\n\nconst sessions = inputItems.flatMap(item => {\n  const value = item.json.data ?? item.json;\n\n  if (Array.isArray(value)) {\n    return value;\n  }\n\n  return [value];\n});\n\nconst results = [];\n\nfor (const session of sessions) {\n  if (!session.id) {\n    throw new Error(\n      `Invalid session. Received keys: ${Object.keys(session).join(\", \")}`\n    );\n  }\n\n  if (!Array.isArray(session.transcript)) {\n    throw new Error(`Invalid transcript for ${session.id}`);\n  }\n\n  if (!Array.isArray(session.participants)) {\n    throw new Error(`Missing participants for ${session.id}`);\n  }\n\n  const turns = session.transcript;\n  const selectedIndices = new Set();\n\n  for (let i = 0; i < Math.min(40, turns.length); i++) {\n    selectedIndices.add(i);\n  }\n\n  for (let i = Math.max(0, turns.length - 20); i < turns.length; i++) {\n    selectedIndices.add(i);\n  }\n\n  const sampledTranscript = [...selectedIndices]\n    .sort((a, b) => a - b)\n    .map(index => turns[index]);\n\n  results.push({\n    json: {\n      ...session,\n      original_turn_count: turns.length,\n      sampled_turn_count: sampledTranscript.length,\n      sampled_transcript: sampledTranscript\n    }\n  });\n}\n\nreturn results;\n"
+      },
+      "id": "991871b2-f079-42fe-9040-53e8830b9e0c",
+      "name": "Validate and Sample Sessions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'llama3', stream: false, format: 'json', messages: [{ role: 'system', content: 'You are a strict meeting classifier. Classify the meeting into exactly one of: Client Coaching, Internal Operations, Sales Discovery. Return only JSON with meeting_type, confidence_score (0 to 1), and summary. Do not invent facts.' }, { role: 'user', content: 'Classify this meeting using its title, participants and sampled transcript.\\n' + JSON.stringify({ title: $json.title, participants: $json.participants, transcript: $json.sampled_transcript }) }] } }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "fd7744b2-da74-4431-bc3b-ee92f84103ec",
+      "name": "Classify Meeting with Llama3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        432,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst classifications = $input.all();\nconst sessions = $('Validate and Sample Sessions').all();\n\nif (classifications.length !== sessions.length) {\n  throw new Error(\n    `Item count mismatch: ${classifications.length} classifications, ${sessions.length} sessions`\n  );\n}\n\nconst allowedTypes = [\n  'Client Coaching',\n  'Internal Operations',\n  'Sales Discovery'\n];\n\nreturn classifications.map((item, index) => {\n  const response = item.json;\n  const original = sessions[index].json;\n\n  const sessionId = original.id;\n\n  let raw = response.message?.content ?? response.response;\n\n  if (typeof raw !== 'string') {\n    throw new Error(`No classification content for ${sessionId}`);\n  }\n\n  let result;\n\n  try {\n    result = JSON.parse(raw);\n  } catch {\n    throw new Error(`Invalid classifier JSON for ${sessionId}: ${raw}`);\n  }\n\n  if (!allowedTypes.includes(result.meeting_type)) {\n    throw new Error(\n      `Invalid meeting_type for ${sessionId}: ${result.meeting_type}`\n    );\n  }\n\n  const confidence = Number(result.confidence_score);\n\n  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {\n    throw new Error(`Invalid confidence score for ${sessionId}`);\n  }\n\n  const accepted =\n    result.meeting_type === 'Client Coaching' &&\n    confidence >= 0.80;\n\n  return {\n    json: {\n      ...original,\n      session_id: sessionId,\n      classification: {\n        meeting_type: result.meeting_type,\n        confidence_score: confidence,\n        summary: result.summary\n      },\n      firewall: {\n        accepted,\n        decision: accepted ? 'ACCEPTED' : 'REJECTED',\n        reason: accepted\n          ? null\n          : result.meeting_type !== 'Client Coaching'\n            ? 'Meeting is not Client Coaching'\n            : 'Confidence score below 0.80'\n      }\n    }\n  };\n});\n"
+      },
+      "id": "a23bc429-cdf9-479b-84d5-dc79c2a97e20",
+      "name": "Validate Classification and Firewall",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a1000000-0000-4000-8000-000000000007",
+              "leftValue": "={{ $json.firewall.accepted }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "68553f43-2abc-43a5-b3e4-bd3dfc740326",
+      "name": "Client Coaching Only?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO archived_sessions (\n    session_id,\n    meeting_type,\n    confidence_score,\n    summary,\n    transcript,\n    metadata,\n    rejection_reason\n)\nVALUES (\n    $1,\n    $2,\n    $3,\n    $4,\n    $5::jsonb,\n    $6::jsonb,\n    $7\n)\nON CONFLICT (session_id)\nDO UPDATE SET\n    meeting_type = EXCLUDED.meeting_type,\n    confidence_score = EXCLUDED.confidence_score,\n    summary = EXCLUDED.summary,\n    transcript = EXCLUDED.transcript,\n    metadata = EXCLUDED.metadata,\n    rejection_reason = EXCLUDED.rejection_reason;",
+        "options": {
+          "queryReplacement": "=={{ [  $json.session_id,  $json.classification.meeting_type,  $json.classification.confidence_score,  $json.classification.summary,  JSON.stringify($json.sampled_transcript),  JSON.stringify({    title: $json.title,    participants: $json.participants,    original_turn_count: $json.original_turn_count,    sampled_turn_count: $json.sampled_turn_count  }),  $json.firewall.reason] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1200,
+        112
+      ],
+      "id": "330f3777-08d1-4ec4-b75d-6664756ae575",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "5gnpXBnMHYkvHLKk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const session = $json;\n\nconst expectedCoach = \"Dr. Sara Hegy\";\n\n// Find the expected coach in the participants list.\nconst coachParticipants = session.participants.filter(\n  participant =>\n    participant.name === expectedCoach &&\n    participant.is_team_member === true\n);\n\nif (coachParticipants.length !== 1) {\n  throw new Error(\n    `${session.id}: Expected exactly one ${expectedCoach} participant, found ${coachParticipants.length}`\n  );\n}\n\n// Extract only the coach's original spoken words.\nconst coachTurns = session.sampled_transcript.filter(\n  turn => turn.speaker === expectedCoach\n);\n\nif (coachTurns.length === 0) {\n  throw new Error(\n    `${session.id}: No transcript turns found for ${expectedCoach}`\n  );\n}\n\nreturn {\n  json: {\n    ...session,\n    coach: expectedCoach,\n    coach_turn_count: coachTurns.length,\n    coach_dialogue: coachTurns.map(turn => ({\n      timestamp: turn.timestamp,\n      text: turn.text\n    }))\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -96
+      ],
+      "id": "b745b3aa-bc58-47d5-97f6-21996054670d",
+      "name": "Validate Coach Identity"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const session = $json;\n\nconst turns = session.coach_dialogue;\n\nif (!Array.isArray(turns) || turns.length === 0) {\n  throw new Error(`${session.session_id}: Missing coach dialogue`);\n}\n\n// Keep each original utterance intact.\nconst voiceSamples = [];\nlet currentChunk = [];\n\nfor (const turn of turns) {\n  const text = turn.text.trim();\n\n  if (!text) continue;\n\n  const currentLength = currentChunk.reduce(\n    (total, item) => total + item.text.length,\n    0\n  );\n\n  if (currentChunk.length > 0 && currentLength + text.length > 700) {\n    voiceSamples.push(currentChunk);\n    currentChunk = [];\n  }\n\n  currentChunk.push({\n    timestamp: turn.timestamp,\n    text\n  });\n}\n\nif (currentChunk.length > 0) {\n  voiceSamples.push(currentChunk);\n}\n\nconst voiceDocuments = voiceSamples.map((chunk, index) => ({\n  stream_type: \"voice_sample\",\n  content: chunk.map(turn => turn.text).join(\"\\n\\n\"),\n  metadata: {\n    session_id: session.session_id,\n    coach: session.coach,\n    chunk_index: index,\n    timestamps: chunk.map(turn => turn.timestamp),\n    source: \"verbatim_coach_dialogue\"\n  }\n}));\n\nreturn {\n  json: {\n    session_id: session.session_id,\n    meeting_type: session.classification.meeting_type,\n    framework_source: session.coach_dialogue,\n    voice_documents: voiceDocuments\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        -96
+      ],
+      "id": "5d5aee60-7b10-421f-9c0f-8d2bffb94d61",
+      "name": "Prepare Dual Streams"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const response = $json;\nconst original = $('Prepare Dual Streams').all()[$itemIndex].json;\n\nconst raw = response.message?.content;\n\nif (typeof raw !== \"string\") {\n  throw new Error(`${original.session_id}: Missing Llama3 response`);\n}\n\nlet parsed;\n\ntry {\n  parsed = JSON.parse(raw);\n} catch {\n  throw new Error(`${original.session_id}: Invalid framework JSON`);\n}\n\nif (!Array.isArray(parsed.frameworks) || parsed.frameworks.length === 0) {\n  throw new Error(`${original.session_id}: No frameworks extracted`);\n}\n\nconst requiredFields = [\n  \"name\",\n  \"core_principle\",\n  \"diagnostic_questions\",\n  \"steps\",\n  \"decision_rules\",\n  \"source_quotes\"\n];\n\nconst frameworks = parsed.frameworks.map((framework, index) => {\n  for (const field of requiredFields) {\n    if (framework[field] === null || framework[field] === undefined) {\n      throw new Error(\n        `${original.session_id}: Framework ${index} has missing field: ${field}`\n      );\n    }\n  }\n\n  if (!framework.name.trim() || !framework.core_principle.trim()) {\n    throw new Error(\n      `${original.session_id}: Framework ${index} has empty required text`\n    );\n  }\n\n  if (!Array.isArray(framework.source_quotes) || framework.source_quotes.length === 0) {\n    throw new Error(\n      `${original.session_id}: Framework ${index} has no source quotes`\n    );\n  }\n\n  return {\n    ...framework,\n    diagnostic_questions: Array.isArray(framework.diagnostic_questions)\n      ? framework.diagnostic_questions\n      : [],\n    steps: Array.isArray(framework.steps) ? framework.steps : [],\n    decision_rules: Array.isArray(framework.decision_rules)\n      ? framework.decision_rules\n      : []\n  };\n});\n\nreturn {\n  json: {\n    session_id: original.session_id,\n    framework_documents: frameworks.map((framework, index) => ({\n      stream_type: \"framework\",\n      content: JSON.stringify(framework),\n      metadata: {\n        session_id: original.session_id,\n        coach: \"Dr. Sara Hegy\",\n        framework_name: framework.name,\n        framework_index: index,\n        source: \"llm_extracted_from_coach_dialogue\"\n      }\n    })),\n    voice_documents: original.voice_documents\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        -96
+      ],
+      "id": "f11c0890-0375-4222-9fa6-44e7d149cba5",
+      "name": "Validate Framework Extraction"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    model: \"llama3\",\n    stream: false,\n    format: \"json\",\n    messages: [\n      {\n        role: \"system\",\n        content: `You are an expert coaching knowledge analyst.\n\nExtract complete, reusable coaching frameworks from the coach's dialogue only.\n\nFor every framework:\n- name: exact framework name.\n- core_principle: explain the central idea in 1-3 complete sentences.\n- diagnostic_questions: include every question the coach uses to diagnose the situation. Preserve the original wording.\n- steps: extract the actual sequence of actions taught by the coach. Do not leave empty if the dialogue describes a process.\n- decision_rules: capture explicit if/then decisions and conditions.\n- source_quotes: include exact quotations from the coach that support the framework.\n\nImportant:\n1. Do not omit important concepts or diagnostic questions.\n2. Distinguish diagnostic questions from general statements.\n3. Preserve distinctions such as neurological load versus operational drift.\n4. Do not invent details.\n5. Use empty arrays only when the dialogue contains no evidence for that field.\n6. Return valid JSON with exactly one top-level key: frameworks.\n7. Every framework must contain all six required fields. Never return null.`\n      },\n      {\n        role: \"user\",\n        content: JSON.stringify({\n          session_id: $json.session_id,\n          coach_dialogue: $json.framework_source\n        })\n      }\n    ]\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1648,
+        -96
+      ],
+      "id": "2880d3b2-cc87-4679-be4b-5ae85298d7dc",
+      "name": "Extract Coaching Frameworks with Llama3"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst documents = items.flatMap(item => [\n  ...(item.json.framework_documents || []),\n  ...(item.json.voice_documents || [])\n]);\n\nif (documents.length === 0) {\n  throw new Error(\"No documents available for embedding\");\n}\n\nreturn documents.map(doc => ({\n  json: {\n    session_id: doc.metadata.session_id,\n    stream_type: doc.stream_type,\n    content: doc.content,\n    metadata: doc.metadata\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2096,
+        -96
+      ],
+      "id": "3cf30cfb-9b19-432b-b158-e507d04cc212",
+      "name": "Flatten Documents"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/embed",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({   model: \"bge-m3\",   input: $json.content }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2320,
+        -96
+      ],
+      "id": "dcee2a60-0eaf-4b4f-b687-50894a5c3746",
+      "name": "Generate BGE-M3 Embeddings"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const embeddingResponse = $json;\n\nconst original = $('Flatten Documents').all()[$itemIndex].json;\n\nconst embedding = embeddingResponse.embeddings?.[0];\n\nif (!Array.isArray(embedding)) {\n  throw new Error(`Missing embedding for item ${$itemIndex}`);\n}\n\nif (embedding.length !== 1024) {\n  throw new Error(`Invalid dimensions: ${embedding.length}`);\n}\n\nreturn {\n  json: {\n    ...original,\n    embedding\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2544,
+        -96
+      ],
+      "id": "1ec17edb-6acf-4702-8d36-c8af63b817aa",
+      "name": "Merge Embeddings with Documents"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO knowledge_vault (\n    session_id,\n    stream_type,\n    content,\n    metadata,\n    embedding\n)\nVALUES ($1, $2, $3, $4::jsonb, $5::vector);",
+        "options": {
+          "queryReplacement": "=={{ [  $json.session_id,  $json.stream_type,  $json.content,  JSON.stringify($json.metadata),  '[' + $json.embedding.join(',') + ']'] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        2768,
+        -96
+      ],
+      "id": "659ce80c-5b9d-436f-8e20-435a10a331dd",
+      "name": "Insert Documents",
+      "credentials": {
+        "postgres": {
+          "id": "5gnpXBnMHYkvHLKk",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Start Ingestion": {
+      "main": [
+        [
+          {
+            "node": "Read Mock Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Mock Transcripts": {
+      "main": [
+        [
+          {
+            "node": "Parse JSON Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse JSON Dataset": {
+      "main": [
+        [
+          {
+            "node": "Validate and Sample Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and Sample Sessions": {
+      "main": [
+        [
+          {
+            "node": "Classify Meeting with Llama3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Meeting with Llama3": {
+      "main": [
+        [
+          {
+            "node": "Validate Classification and Firewall",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Classification and Firewall": {
+      "main": [
+        [
+          {
+            "node": "Client Coaching Only?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Client Coaching Only?": {
+      "main": [
+        [
+          {
+            "node": "Validate Coach Identity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Coach Identity": {
+      "main": [
+        [
+          {
+            "node": "Prepare Dual Streams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Dual Streams": {
+      "main": [
+        [
+          {
+            "node": "Extract Coaching Frameworks with Llama3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Coaching Frameworks with Llama3": {
+      "main": [
+        [
+          {
+            "node": "Validate Framework Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Framework Extraction": {
+      "main": [
+        [
+          {
+            "node": "Flatten Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Documents": {
+      "main": [
+        [
+          {
+            "node": "Generate BGE-M3 Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate BGE-M3 Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Merge Embeddings with Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Embeddings with Documents": {
+      "main": [
+        [
+          {
+            "node": "Insert Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "pinData": {},
+  "versionId": "d81ef8a1-c461-40e8-9bd2-bc07c521706b",
+  "activeVersionId": null,
+  "versionCounter": 75,
+  "triggerCount": 0,
+  "sourceWorkflowId": null,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-11-11T11:56:59.282Z",
+      "createdAt": "2026-11-11T11:56:59.282Z",
+      "role": "workflow:owner",
+      "workflowId": "060wxFMDltBrRet5",
+      "projectId": "qfbktj65qptIpCoE",
+      "project": {
+        "updatedAt": "2026-11-11T11:54:28.694Z",
+        "createdAt": "2026-11-11T11:34:17.772Z",
+        "id": "qfbktj65qptIpCoE",
+        "name": "Mohammed aintomar.mohamed19@gmail.com <aintomar.mohammed200@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "customTelemetryTags": [],
+        "creatorId": "2963e29d-e52e-4e26-9693-f41c4351787e"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
+  }
+}
