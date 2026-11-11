@@ -4,7 +4,7 @@
   "id": "gG2Z6IQZmiWmBRO8",
   "name": "Workflow B - Gated Retrieval",
   "description": null,
-  "active": false,
+  "active": true,
   "isArchived": false,
   "nodes": [
     {
@@ -120,9 +120,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "WITH q AS (\n    SELECT $1::vector AS embedding\n),\nranked AS (\n    SELECT\n        k.id,\n        k.session_id,\n        k.stream_type,\n        k.content,\n        k.metadata,\n        1 - (k.embedding <=> q.embedding) AS similarity,\n        ROW_NUMBER() OVER (\n            PARTITION BY k.stream_type\n            ORDER BY k.embedding <=> q.embedding\n        ) AS rank\n    FROM knowledge_vault k\n    CROSS JOIN q\n    WHERE\n        (k.stream_type = 'framework'\n         AND 1 - (k.embedding <=> q.embedding) >= 0.50)\n        OR\n        (k.stream_type = 'voice_sample'\n         AND 1 - (k.embedding <=> q.embedding) >= 0.60)\n)\nSELECT *\nFROM ranked\nWHERE rank <= 2\nORDER BY similarity DESC;",
+        "query": "WITH q AS (\n    SELECT $1::vector AS embedding\n),\nranked AS (\n    SELECT\n        k.id,\n        k.session_id,\n        k.stream_type,\n        k.content,\n        k.metadata,\n        1 - (k.embedding <=> q.embedding) AS similarity,\n        ROW_NUMBER() OVER (\n            PARTITION BY k.stream_type\n            ORDER BY k.embedding <=> q.embedding\n        ) AS rank\n    FROM knowledge_vault k\n    CROSS JOIN q\n    WHERE\n        (k.stream_type = 'framework'\n         AND 1 - (k.embedding <=> q.embedding) >= 0.70)\n        OR\n        (k.stream_type = 'voice_sample'\n         AND 1 - (k.embedding <=> q.embedding) >= 0.65)\n)\nSELECT *\nFROM ranked\nWHERE rank <= 2\nORDER BY similarity DESC;",
         "options": {
-          "queryReplacement": "=={{ [  '[' + $('Merge Query and Embedding').first().json.embedding.join(',') + ']'] }}"
+          "queryReplacement": "={{ [  '[' + $('Merge Query and Embedding').first().json.embedding.join(',') + ']'] }}"
         }
       },
       "id": "badfb0cb-f444-49d7-a4e5-3a7669815d9b",
@@ -210,7 +210,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({model:'llama3',stream:false,messages:[{role:'system',content:'You are a coaching knowledge assistant. Answer only from the retrieved coaching context. Do not invent frameworks or advice. Use the coach voice samples to guide tone, not as factual evidence. If the context does not support an answer, say so clearly.'},{role:'user',content:'Question: '+$json.query+'\\n\\nRetrieved context:\\n'+$json.context}]}) }}",
+        "body": "={{ JSON.stringify({\n  model: 'llama3',\n  stream: false,\n  messages: [\n    {\n      role: 'system',\n      content: `You are a coaching knowledge assistant.\nAnswer using only the retrieved coaching frameworks as factual evidence.\nUse voice samples only to mirror the coach's communication style.\nDo not invent frameworks, quotations, facts, or advice.\nIf the retrieved context does not support an answer, say so clearly.\nUse readable paragraphs and proper spacing.\n\nExample:\nQuestion: How can a manager reduce micromanagement?\nAnswer: Start by identifying the information gaps that force the manager to intervene. Establish clear handoff constraints and decision ownership, then use agreed checkpoints to maintain accountability.`\n    },\n    {\n      role: 'user',\n      content: 'Question: ' + $json.query + '\\\\n\\\\nRetrieved context:\\\\n' + $json.context\n    }\n  ]\n}) }}",
         "options": {}
       },
       "id": "66ba7d7d-f422-4d6b-84a6-2c0f442a8944",

@@ -26,8 +26,8 @@ An n8n-based Retrieval-Augmented Generation (RAG) system for coaching transcript
 3. Generate a BGE-M3 query embedding.
 4. Retrieve documents using cosine similarity.
 5. Apply independent SQL thresholds:
-   - Framework: >= 0.50
-   - Voice sample: >= 0.60
+   - Framework: >= 0.70
+   - Voice sample: >= 0.65
 6. Retrieve at most two documents per stream.
 7. If no documents qualify, return a deterministic fallback without calling the LLM.
 8. Otherwise, generate an answer using Llama 3 and retrieved context.
@@ -129,9 +129,12 @@ After activating Workflow B, test its production webhook:
 RAG_URL=http://localhost:5678/webhook/rag/query python3 scripts/test_retrieval.py
 ```
 
-The retrieval smoke test checks:
-- An unrelated query receives the exact no-match fallback.
-- A coaching query receives a non-empty answer.
+The production webhook was verified with these cases:
+- Coaching query about information architecture: retrieved framework and voice context and generated an answer.
+- `Hello`: returned the static greeting response.
+- `What is the capital of France?`: returned the exact no-match fallback.
+
+The database contained 3 framework documents, 4 voice samples, and 2 archived rejected sessions during verification.
 
 For local n8n test-webhook requests, click **Execute Workflow** before sending a request to `/webhook-test/rag/query`. Test webhooks are temporary and generally accept one request per execution.
 
@@ -168,6 +171,16 @@ Expected no-match response:
 ├── init.sql
 └── README.md
 ```
+
+## Dataset note
+
+The supplied `data/mock_transcripts.json` file was preserved unchanged. Although the assessment description estimates approximately 1,500 words per transcript, the provided file contains 4 sessions and 627 words total:
+- SES-101: 204 words
+- SES-102: 184 words
+- SES-103: 109 words
+- SES-104: 130 words
+
+The implementation processes the supplied data rather than fabricating transcript content. Consequently, the available coach dialogue is limited and some voice chunks may fall below the requested 400-character minimum when the source dialogue is too short.
 
 ## Scope and limitations
 

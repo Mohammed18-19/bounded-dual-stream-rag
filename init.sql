@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS knowledge_vault (
     content TEXT NOT NULL,
     metadata JSONB DEFAULT '{}'::jsonb,
     embedding vector(1024) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT knowledge_vault_session_stream_content_unique
+        UNIQUE (session_id, stream_type, content)
 );
 
 CREATE INDEX IF NOT EXISTS knowledge_vault_embedding_hnsw
